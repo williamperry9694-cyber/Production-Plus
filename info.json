@@ -1,0 +1,11 @@
+{
+  "name": "production-plus",
+  "version": "0.2.0",
+  "title": "Production Plus",
+  "author": "Reiji_Kishigami",
+  "factorio_version": "2.1",
+  "description": "Replaces the production window with one that adds a Net panel (produced minus consumed) next to production and consumption, so you can see deficits and surpluses at a glance. Also adds search, a sortable table view, click-to-graph and pinning, lock and flip, quality filters, a Power tab with every electric network, CSV export, and a one-click switch back to vanilla. Built to look like vanilla and stay lightweight.",
+  "dependencies": [
+    "base >= 2.1.0"
+  ]
+}
