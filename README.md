@@ -1,6 +1,7 @@
 <img src="media/thumbnail.png" width="144" align="right">
 
 # Production Plus
+*by Reiji_Kishigami*
 
 **Your production statistics, plus the number that actually matters: net.**
 
