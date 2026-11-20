@@ -9,6 +9,8 @@ Production Plus replaces the production window (same hotkey, same button) with a
 
 ![Overview](media/00-overview.gif)
 
+**[▶ Watch the 6-minute demo (MP4)](media/demo.mp4)**
+
 ---
 
 ## Features
@@ -74,8 +76,14 @@ Exports the current view to `script-output/production-plus/` for spreadsheets.
 ### Pollution tab
 **Emitted**, **Absorbed** and **Net** panels show which buildings put out pollution and what soaks it up: ground, trees and spawners. The Net panel adds a summary with the totals and the amount currently on the surface. Spores on Gleba are shown the same way. Search, pins, click-to-graph, lock and flip all work here too.
 
-### Evolution tab (Table view)
-Enemy evolution over time for the selected planet, plus how much of it comes from **time**, **pollution** and **spawner kills**. The game keeps no evolution history, so the mod records it, starting from when you install it.
+![Pollution tab](media/12-pollution.gif)
+
+### Enemy tab (Table view)
+- **Evolution:** evolution over time for the selected planet, plus how much of it comes from **time**, **pollution** and **spawner kills**. The game keeps no evolution history, so the mod records it, starting from when you install it.
+- **Expansion, as seen by your radars:** an estimated countdown to the next expansion, the size of the last settler party, new bases seen, and a button to show the newest ones on the map. Anything outside radar coverage isn't counted.
+- **Evolution stage:** one lane each for base types, every spawner's units and worms, on a shared 0–100% scale. Each lane shows where every stage starts, what that lane makes right now and what comes next. It's read from the game data, so modded enemies (Bob's Enemies, Rampant) and Gleba's pentapods work too.
+
+![Enemy tab](media/14-enemy.gif)
 
 ### Settings
 The gear button at the end of the control row opens the settings:
@@ -83,6 +91,8 @@ The gear button at the end of the control row opens the settings:
 - **Graph scale:** fits the graphs to your screen, from 50% to 300% in 5% steps. While settings are open, each graph shows a yellow frame, so you can see when it just touches the edges of its box.
 
 Both are saved per player and follow you across saves.
+
+![Settings and graph scale](media/13-settings-graph-scale.gif)
 
 ### Vanilla is one click away
 The **Vanilla view** button opens the original window, which has its own button to come straight back. Window mode in the settings lets you choose:

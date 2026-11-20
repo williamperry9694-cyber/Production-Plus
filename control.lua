@@ -1135,6 +1135,18 @@ local function full_draw(player, st, slot, g, n)
       rendering.draw_text { text = g.unit == "W" and fmt_power(v) or (axis_label(v) .. (g.unit == "%" and "%" or "")), color = CLR.LABEL, target = P, alignment = "right", vertical_alignment = "middle", scale = 0.8, surface = surface, players = players })
   end
 
+  for _, sv in ipairs(g.stages or {}) do
+    if sv.v > 0 and sv.v <= g.ymax then
+      local y = ypx(g, sv.v)
+      local args = { color = CLR.STAGE, width = 1, from = P, to = P, surface = surface, players = players, dash_length = 6, gap_length = 5 }
+      local ok, line = pcall(rendering.draw_line, args)
+      if not ok then args.dash_length, args.gap_length = nil, nil; line = rendering.draw_line(args) end
+      static("line", { x0, y }, { x1, y }, line)
+      static("text", { x0 + 6, y - 2 }, nil,
+        rendering.draw_text { text = sv.label, color = CLR.STAGE, target = P, alignment = "left", vertical_alignment = "bottom", scale = 0.7, surface = surface, players = players })
+    end
+  end
+
   local scale = SCALE_BY_KEY[graph_key(st)]
   local axis = scale.axis or 1000
   for i = 0, 10 do
@@ -1377,6 +1389,8 @@ local function ui_scale(player)
 end
 
 CLR.FIT = { 1, 0.85, 0.2 }
+CLR.STAGE = { 0.85, 0.55, 0.35, 0.8 }
+CLR.STAGES = { { 0.45, 0.75, 0.35 }, { 0.9, 0.8, 0.3 }, { 0.95, 0.55, 0.25 }, { 0.9, 0.3, 0.3 }, { 0.7, 0.4, 0.9 }, { 0.5, 0.6, 1 } }
 
 local function add_fit(player, g)
   if (g.fit and g.fit.valid) or not (g.cam and g.cam.valid) then return end
@@ -2866,6 +2880,414 @@ end
 
 EV.ROWS = { { key = "time", color = { 0.55, 0.75, 1 } }, { key = "pollution", color = { 0.9, 0.45, 0.35 } }, { key = "kills", color = { 0.9, 0.75, 0.3 } } }
 
+-- Evolution stages, read from the spawners' own unit lists (works with modded enemies).
+function EV.pev(pt) return pt.evolution_factor or pt[1] or 0 end
+function EV.pw(pt) return pt.weight or pt[2] or 0 end
+
+function EV.weight(points, e)
+  local n = #points
+  if n == 0 then return 0 end
+  if e <= EV.pev(points[1]) then return EV.pw(points[1]) end
+  for i = 2, n do
+    local b = points[i]
+    if e <= EV.pev(b) then
+      local a = points[i - 1]
+      local span = EV.pev(b) - EV.pev(a)
+      local f = span > 0 and (e - EV.pev(a)) / span or 1
+      return EV.pw(a) + (EV.pw(b) - EV.pw(a)) * f
+    end
+  end
+  return EV.pw(points[n])
+end
+
+-- Evolution at which a unit starts to appear.
+function EV.start(points)
+  for i, pt in ipairs(points) do
+    if EV.pw(pt) > 0 then return i > 1 and EV.pev(points[i - 1]) or EV.pev(pt) end
+  end
+  return 1
+end
+
+-- Lanes for the stage section: one for base types (spawners), one per spawner type
+-- (its units), one for worms. Built from what's on the planet plus what the planet's
+-- map generation places, read from the game data, cached for 10 minutes per surface.
+function EV.req(proto)
+  local ok, v = pcall(function() return proto.build_base_evolution_requirement end)
+  return ok and type(v) == "number" and v or 0
+end
+
+function EV.lanes(surface)
+  storage.evo_sp = storage.evo_sp or {}
+  local c = storage.evo_sp[surface.name]
+  if c and c.lanes and game.tick - c.t < 36000 then return c.lanes end
+  local spawners, worms = {}, {}
+  local function note(name, n)
+    local p = prototypes.entity[name]
+    if not p then return end
+    if p.type == "unit-spawner" then spawners[name] = (spawners[name] or 0) + n
+    elseif p.type == "turret" then worms[name] = (worms[name] or 0) + n end
+  end
+  pcall(function()
+    for _, e in pairs(surface.find_entities_filtered { type = { "unit-spawner", "turret" }, force = "enemy", limit = 1000 }) do
+      if e.valid then note(e.name, 1) end
+    end
+  end)
+  pcall(function()   -- what this planet's map generation places, so upcoming types show too
+    local ap = surface.map_gen_settings.autoplace_settings
+    local ent = ap and ap.entity and ap.entity.settings
+    for name in pairs(ent or {}) do note(name, 0) end
+  end)
+
+  local function sorted(set, start_of)
+    local out = {}
+    for name, n in pairs(set) do out[#out + 1] = { name = name, n = n, start = start_of(name) } end
+    table.sort(out, function(a, b) if a.start ~= b.start then return a.start < b.start end return a.name < b.name end)
+    return out
+  end
+  local lanes = {}
+  local sp = sorted(spawners, function(n) return EV.req(prototypes.entity[n]) end)
+  if #sp > 0 then lanes[#lanes + 1] = { kind = "bases", label = { "production-plus.lane-bases" }, entries = sp } end
+
+  local by_count = {}
+  for _, s in ipairs(sp) do by_count[#by_count + 1] = s end
+  table.sort(by_count, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.name < b.name end)
+  for _, s in ipairs(by_count) do
+    local units = prototypes.entity[s.name].result_units
+    if units and #units > 0 then
+      local u = {}
+      for _, ru in ipairs(units) do
+        local pts = {}
+        for _, pt in ipairs(ru.spawn_points or {}) do pts[#pts + 1] = { EV.pev(pt), EV.pw(pt) } end
+        u[#u + 1] = { name = ru.unit, points = pts, start = EV.start(pts) }
+      end
+      table.sort(u, function(a, b) if a.start ~= b.start then return a.start < b.start end return a.name < b.name end)
+      lanes[#lanes + 1] = { kind = "units", label = EV.name(s.name), icon = s.name, entries = u }
+    end
+  end
+  local wm = sorted(worms, function(n) return EV.req(prototypes.entity[n]) end)
+  if #wm > 0 then lanes[#lanes + 1] = { kind = "worms", label = { "production-plus.lane-worms" }, entries = wm } end
+
+  if #lanes == 0 and c and c.lanes then lanes = c.lanes end
+  storage.evo_sp[surface.name] = { t = game.tick, lanes = lanes }
+  return lanes
+end
+
+function EV.name(name)
+  local p = prototypes.entity[name]
+  return p and p.localised_name or name
+end
+
+function EV.icon(parent, sprite, size)
+  local sp = parent.add { type = "sprite", sprite = helpers.is_valid_sprite_path(sprite) and sprite or "utility/questionmark" }
+  sp.style.width = size
+  sp.style.height = size
+  sp.style.stretch_image_to_widget_size = true
+  return sp
+end
+
+---------------------------------------------------------------------------
+-- Expansion, as seen by radar. Per force and surface; only what happens inside
+-- chunks the force's radars currently see is recorded.
+---------------------------------------------------------------------------
+
+EV.BASE_KEEP = 200     -- base sightings kept per force and surface
+EV.SAME_BASE = 300     -- ticks: buildings this close in time and space are one base
+
+function EV.cooldown(e)
+  local ok, lo, hi = pcall(function()
+    local x = game.map_settings.enemy_expansion
+    return x.min_expansion_cooldown, x.max_expansion_cooldown
+  end)
+  if not (ok and lo and hi) then return nil end
+  return hi - (hi - lo) * math.max(0, math.min(1, e))
+end
+
+function EV.watchers(surface, pos)
+  local out = {}
+  local cp = { x = math.floor(pos.x / 32), y = math.floor(pos.y / 32) }
+  for _, force in pairs(game.forces) do
+    if #force.players > 0 then
+      local ok, vis = pcall(function() return force.is_chunk_visible(surface, cp) end)
+      if ok and vis then out[#out + 1] = force end
+    end
+  end
+  return out
+end
+
+function EV.exp(force_name, surface_name)
+  storage.exp = storage.exp or {}
+  local f = storage.exp[force_name]
+  if not f then f = {}; storage.exp[force_name] = f end
+  local x = f[surface_name]
+  if not x then x = { bases = {}, total = 0 }; f[surface_name] = x end
+  return x
+end
+
+function EV.on_base(e)
+  local ent = e.entity
+  if not (ent and ent.valid) then return end
+  local surface, pos = ent.surface, ent.position
+  for _, force in ipairs(EV.watchers(surface, pos)) do
+    local x = EV.exp(force.name, surface.name)
+    local last = x.bases[#x.bases]
+    if last and game.tick - last.tick <= EV.SAME_BASE and (last.x - pos.x) ^ 2 + (last.y - pos.y) ^ 2 < 64 * 64 then
+      last.n = last.n + 1
+    else
+      x.bases[#x.bases + 1] = { tick = game.tick, x = pos.x, y = pos.y, n = 1 }
+      x.total = x.total + 1
+      if #x.bases > EV.BASE_KEEP then table.remove(x.bases, 1) end
+      x.seen = game.tick
+      x.cooldown = EV.cooldown(EV.read(surface) or 0)
+    end
+  end
+end
+
+function EV.on_party(e)
+  local g = e.group or e.unit
+  if not (g and g.valid) then return end
+  local ok, surface, pos, size = pcall(function()
+    local members = g.members
+    return g.surface, g.position, members and #members or 1
+  end)
+  if not (ok and surface and pos) then return end
+  for _, force in ipairs(EV.watchers(surface, pos)) do
+    local x = EV.exp(force.name, surface.name)
+    x.party, x.party_tick = size, game.tick
+  end
+end
+
+script.on_event(defines.events.on_biter_base_built, EV.on_base)
+script.on_event(defines.events.on_build_base_arrived, EV.on_party)
+
+function EV.show_base(player, st)
+  local view = st.evo_view
+  if not view then return end
+  local x = storage.exp and storage.exp[player.force.name] and storage.exp[player.force.name][view.surface]
+  if not (x and #x.bases > 0) then return end
+  view.map_i = ((view.map_i or 0) % math.min(#x.bases, 10)) + 1
+  local b = x.bases[#x.bases - view.map_i + 1]
+  local surface = game.surfaces[view.surface]
+  if not (b and surface) then return end
+  pcall(function() player.set_controller { type = defines.controllers.remote, position = { b.x, b.y }, surface = surface } end)
+  pcall(function() player.zoom = 0.5 end)
+  for _, mode in ipairs({ "game", "chart" }) do
+    pcall(function()
+      rendering.draw_rectangle { color = { 1, 0.4, 0.3 }, width = 4, filled = false,
+        left_top = { b.x - 12, b.y - 12 }, right_bottom = { b.x + 12, b.y + 12 },
+        surface = surface, players = { player }, time_to_live = 600, render_mode = mode }
+    end)
+  end
+end
+
+---------------------------------------------------------------------------
+-- Enemy tab layout
+---------------------------------------------------------------------------
+
+-- Stage section under the two columns: one lane per enemy type on a shared 0-100% scale.
+EV.LABEL_W, EV.MIX_W = 150, 300
+
+function EV.build_stages(f, st, surface, view)
+  local lanes = EV.lanes(surface)
+  if #lanes == 0 then return end
+  local sec = f.add { type = "flow", direction = "vertical" }
+  sec.style.padding = { 8, 24, 4, 24 }
+  sec.style.vertical_spacing = 4
+  sec.add { type = "label", style = "caption_label", caption = { "production-plus.evolution-stage" } }
+  local BW = TG.TABLE_W - 48 - 16 - EV.LABEL_W - EV.MIX_W - 24
+  local sp = sec.add { type = "scroll-pane", style = "pp_table_scroll", vertical_scroll_policy = "auto", horizontal_scroll_policy = "never" }
+  sp.style.maximal_height = TG.TABLE_H - 36 - 200 - 200 - 40
+  sp.style.width = TG.TABLE_W - 48
+  view.lanes, view.bw = {}, BW
+  local lines = {}   -- graph: one dashed line per distinct start above 0
+
+  for li, lane in ipairs(lanes) do
+    -- group entries that start together
+    local stages = {}
+    for _, en in ipairs(lane.entries) do
+      local last = stages[#stages]
+      if last and en.start <= last.start + 1e-6 then
+        last.names[#last.names + 1] = en.name
+      else
+        stages[#stages + 1] = { start = en.start, names = { en.name } }
+      end
+    end
+    for _, sg in ipairs(stages) do
+      if sg.start > 0 then
+        local k = string.format("%.3f", sg.start)
+        lines[k] = lines[k] or { v = sg.start * 100, names = {} }
+        for _, n in ipairs(sg.names) do table.insert(lines[k].names, n) end
+      end
+    end
+
+    local box = sp.add { type = "flow", direction = "vertical" }
+    box.style.vertical_spacing = 2
+    box.style.bottom_margin = 6
+    local top = box.add { type = "flow", direction = "horizontal" }
+    top.style.vertical_align = "center"
+    top.style.horizontal_spacing = 8
+    local lab = top.add { type = "flow", direction = "horizontal" }
+    lab.style.width = EV.LABEL_W
+    lab.style.vertical_align = "center"
+    lab.style.horizontal_spacing = 4
+    if lane.icon then EV.icon(lab, "entity/" .. lane.icon, 20) end
+    local ln = lab.add { type = "label", caption = lane.label }
+    ln.style.font_color = { 0.85, 0.85, 0.85 }
+    local rowA = top.add { type = "flow", direction = "horizontal" }
+    rowA.style.width = BW
+    rowA.style.horizontal_spacing = 0
+    local mix = top.add { type = "flow", direction = "horizontal" }
+    mix.style.width = EV.MIX_W
+    mix.style.vertical_align = "center"
+    mix.style.horizontal_spacing = 4
+    local function indented(parent)
+      local r = parent.add { type = "flow", direction = "horizontal" }
+      r.style.horizontal_spacing = 0
+      r.add { type = "empty-widget" }.style.width = EV.LABEL_W + 8
+      return r
+    end
+    local segrow = indented(box)
+    local rowB = indented(box)
+    local nrow = box.add { type = "flow", direction = "horizontal" }
+    nrow.add { type = "empty-widget" }.style.width = EV.LABEL_W + 4
+    local nxt = nrow.add { type = "label", caption = "" }
+    nxt.style.font_color = CLR.LABEL
+
+    -- Labels alternate above (odd stages) and below (even stages) the bar, so each one
+    -- has room up to the stage after next. The last label in a row may grow leftwards.
+    local n = #stages
+    local x = {}
+    for i, sg in ipairs(stages) do x[i] = math.floor(sg.start * BW + 0.5) end
+    x[n + 1] = BW
+    local function need(sg)
+      local nm = sg.names[1]
+      return #sg.names * 22 + 8 + (#nm + 10 + (#sg.names > 1 and 3 or 0)) * 7
+    end
+    local cells = { {}, {} }
+    for i = 1, n do
+      local r = (i % 2 == 1) and 1 or 2
+      cells[r][#cells[r] + 1] = { i = i, a = x[i], b = x[math.min(i + 2, n + 1)] }
+    end
+    for r = 1, 2 do
+      local list = cells[r]
+      local c = list[#list]
+      if c and need(stages[c.i]) > c.b - c.a and c.i > 1 then
+        -- right-align the last label and let it start where the previous one in this row ends
+        local p = list[#list - 1]
+        local start = math.max(p and (p.a + need(stages[p.i])) or 0, BW - need(stages[c.i]))
+        c.a = math.min(c.a, start)
+        if p then p.b = math.max(p.a + 24, math.min(p.b, c.a)) end
+        c.a = math.max(c.a, p and p.b or 0)
+        c.right = true
+      end
+    end
+    local segs = {}
+    for i, sg in ipairs(stages) do
+      local stop = stages[i + 1] and stages[i + 1].start or 1
+      local w = math.max(8, x[i + 1] - x[i])
+      local pb = segrow.add { type = "progressbar", value = 0 }
+      pb.style.width = w
+      pb.style.color = CLR.STAGES[(i - 1) % #CLR.STAGES + 1]
+      segs[i] = { bar = pb, start = sg.start, stop = stop }
+    end
+    for r, row in ipairs({ rowA, rowB }) do
+      local cursor = 0
+      for _, c in ipairs(cells[r]) do
+        local sg = stages[c.i]
+        if c.a > cursor then row.add { type = "empty-widget" }.style.width = c.a - cursor end
+        local pct = string.format("%d", math.floor(sg.start * 100 + 0.5))
+        local tip = { "" }
+        for k, nm in ipairs(sg.names) do
+          tip[#tip + 1] = { "production-plus.evolution-unit-tooltip", EV.name(nm), pct }
+          if k < #sg.names then tip[#tip + 1] = "\n" end
+        end
+        segs[c.i].bar.tooltip = tip
+        local w = math.max(8, c.b - c.a)
+        local cell = row.add { type = "flow", direction = "horizontal" }
+        cell.style.width = w
+        cell.style.vertical_align = "center"
+        cell.style.horizontal_spacing = 2
+        if c.right then cell.style.horizontal_align = "right" end
+        local fits = need(sg) <= w
+        for k, nm in ipairs(sg.names) do
+          if fits or k == 1 then EV.icon(cell, "entity/" .. nm, 20).tooltip = tip end
+        end
+        if fits then
+          local l = cell.add { type = "label", caption = { "", EV.name(sg.names[1]), #sg.names > 1 and " +" .. (#sg.names - 1) or "", " · ", pct, "%" }, tooltip = tip }
+          l.style.font_color = { 0.8, 0.8, 0.8 }
+          l.style.left_margin = 2
+        end
+        cursor = c.a + w
+      end
+    end
+    view.lanes[li] = { lane = lane, stages = stages, segs = segs, mix = mix, next = nxt, mixkey = nil }
+  end
+
+  local mrow = sp.add { type = "flow", direction = "horizontal" }
+  mrow.style.horizontal_spacing = 0
+  view.mpad = mrow.add { type = "empty-widget" }
+  view.mpad.style.width = 0
+  view.mlabel = mrow.add { type = "label", style = "caption_label", caption = "" }
+
+  local g = st.graphs[4]
+  if g then
+    g.stages = {}
+    for _, l in pairs(lines) do
+      local label = { "", string.format("%d%%: ", math.floor(l.v + 0.5)), EV.name(l.names[1]), #l.names > 1 and (" +" .. (#l.names - 1)) or "" }
+      g.stages[#g.stages + 1] = { v = l.v, label = label }
+    end
+    table.sort(g.stages, function(a, b) return a.v < b.v end)
+  end
+end
+
+function EV.refresh_stages(view, e)
+  if not view.lanes then return end
+  for _, L in ipairs(view.lanes) do
+    for _, sg in ipairs(L.segs) do
+      local span = sg.stop - sg.start
+      sg.bar.value = math.max(0, math.min(1, span > 0 and (e - sg.start) / span or 0))
+    end
+    -- what this lane makes right now
+    local items, key = {}, {}
+    if L.lane.kind == "units" then
+      local total = 0
+      for _, u in ipairs(L.lane.entries) do u.w = math.max(0, EV.weight(u.points, e)); total = total + u.w end
+      for _, u in ipairs(L.lane.entries) do
+        if u.w > 0 and total > 0 then
+          local p = math.floor(u.w / total * 100 + 0.5)
+          items[#items + 1] = { u.name, p .. "%" }
+          key[#key + 1] = u.name .. p
+        end
+      end
+    else
+      for _, en in ipairs(L.lane.entries) do
+        if en.start <= e + 1e-9 then items[#items + 1] = { en.name }; key[#key + 1] = en.name end
+      end
+    end
+    local k = table.concat(key, ",")
+    if L.mixkey ~= k then
+      L.mixkey = k
+      L.mix.clear()
+      for _, it in ipairs(items) do
+        EV.icon(L.mix, "entity/" .. it[1], 20).tooltip = EV.name(it[1])
+        if it[2] then L.mix.add { type = "label", caption = it[2] }.style.right_margin = 6 end
+      end
+    end
+    local nxt
+    for _, sg in ipairs(L.stages) do
+      if sg.start > e + 1e-9 then nxt = sg break end
+    end
+    if nxt then
+      L.next.caption = { "production-plus.evolution-next", EV.name(nxt.names[1]),
+        string.format("%.0f", nxt.start * 100), string.format("%.1f", (nxt.start - e) * 100) }
+    else
+      L.next.caption = { "production-plus.lane-done-" .. L.lane.kind }
+    end
+  end
+  local x = math.floor(math.max(0, math.min(1, e)) * view.bw + 0.5)
+  view.mpad.style.width = EV.LABEL_W + 8 + math.max(0, x - 6)
+  view.mlabel.caption = string.format("[img=pp-sort-asc] %.1f%%", e * 100)
+end
+
 function EV.build(parent, player, st)
   local surface = resolve_surface(player, st) or player.surface
   local f = parent.add { type = "frame", name = "pp_panel_table", direction = "vertical", style = "inside_deep_frame" }
@@ -2893,40 +3315,98 @@ function EV.build(parent, player, st)
     sprite = pick_sprite("entity/small-biter", "item/biter-egg", "utility/questionmark") } }
   g.sig, g.dirty = "evo|" .. surface.name, true
 
-  local t = f.add { type = "table", column_count = 3 }
-  t.style.padding = { 16, 24, 8, 24 }
-  t.style.horizontal_spacing = 24
-  t.style.vertical_spacing = 14
-  t.style.column_alignments[3] = "right"
-  local function head(key, w)
-    local l = t.add { type = "label", style = "caption_label", caption = { "production-plus." .. key } }
-    l.style.width = w
-    l.style.font_color = { 0.85, 0.85, 0.85 }
-  end
-  local BAR_W = TG.TABLE_W - 48 - 260 - 160 - 48
-  head("evolution-source", 260)
-  head("evolution-share", BAR_W)
-  head("evolution-value", 160)
   local view = { surface = surface.name, rows = {} }
+  local cols = f.add { type = "flow", direction = "horizontal" }
+  cols.style.padding = { 12, 24, 4, 24 }
+  cols.style.horizontal_spacing = 24
+  local HALF = math.floor((TG.TABLE_W - 48 - 24) / 2)
+
+  -- left: evolution breakdown
+  local left = cols.add { type = "flow", direction = "vertical" }
+  left.style.width = HALF
+  left.style.vertical_spacing = 8
+  left.add { type = "label", style = "caption_label", caption = { "production-plus.evolution-heading" } }
+  local t = left.add { type = "table", column_count = 3 }
+  t.style.horizontal_spacing = 16
+  t.style.vertical_spacing = 10
+  t.style.column_alignments[3] = "right"
+  local BAR_W = HALF - 200 - 90 - 32
   for _, r in ipairs(EV.ROWS) do
     local name = t.add { type = "label", caption = { "production-plus.evolution-" .. r.key } }
-    name.style.width = 260
+    name.style.width = 200
     local bar = t.add { type = "progressbar", value = 0 }
     bar.style.width = BAR_W
     bar.style.color = r.color
     local val = t.add { type = "label", caption = "" }
-    val.style.width = 160
+    val.style.width = 90
     val.style.horizontal_align = "right"
     view.rows[r.key] = { bar = bar, val = val }
   end
   local tl = t.add { type = "label", style = "caption_label", caption = { "production-plus.evolution-total" } }
-  tl.style.width = 260
+  tl.style.width = 200
   t.add { type = "empty-widget" }
   local tv = t.add { type = "label", style = "caption_label", caption = "" }
-  tv.style.width = 160
+  tv.style.width = 90
   tv.style.horizontal_align = "right"
   view.total = tv
+
+  -- right: expansion, as seen by radar
+  local right = cols.add { type = "flow", direction = "vertical" }
+  right.style.width = HALF
+  right.style.vertical_spacing = 10
+  local rh = right.add { type = "flow", direction = "horizontal" }
+  rh.add { type = "label", style = "caption_label", caption = { "production-plus.expansion" } }
+  local sub = rh.add { type = "label", caption = { "production-plus.expansion-radar" } }
+  sub.style.font_color = CLR.LABEL
+  local function line(key)
+    local fl = right.add { type = "flow", direction = "horizontal" }
+    fl.style.vertical_align = "center"
+    local k = fl.add { type = "label", caption = { "production-plus.expansion-" .. key } }
+    k.style.width = 200
+    k.style.font_color = { 0.75, 0.75, 0.75 }
+    return fl, fl.add { type = "label", caption = "" }
+  end
+  local _, next_l = line("next")
+  local _, party_l = line("party")
+  local _, bases_l = line("bases")
+  local lf, last_l = line("last")
+  last_l.style.width = HALF - 200 - 140
+  local mb = lf.add { type = "button", caption = { "production-plus.expansion-map" }, tags = { pp = "evo_map" },
+    tooltip = { "production-plus.expansion-map-tooltip" } }
+  mb.style.minimal_width = 0
+  view.exp = { next = next_l, party = party_l, bases = bases_l, last = last_l, map = mb }
+
+  EV.build_stages(f, st, surface, view)
   st.evo_view = view
+end
+
+function EV.refresh_expansion(player, view, e)
+  local ex = view.exp
+  if not ex then return end
+  local x = storage.exp and storage.exp[player.force.name] and storage.exp[player.force.name][view.surface]
+  local tick = game.tick
+  if not (x and x.seen) then
+    ex.next.caption = { "production-plus.expansion-waiting" }
+  else
+    local cd = EV.cooldown(e) or x.cooldown
+    local left = cd and (x.seen + cd - tick)
+    if not left then
+      ex.next.caption = "?"
+    elseif left > 0 then
+      ex.next.caption = { "production-plus.expansion-in", fmt_duration(left / 60) }
+    else
+      ex.next.caption = { "production-plus.expansion-due" }
+    end
+  end
+  ex.party.caption = (x and x.party) and { "production-plus.expansion-party-n", x.party } or { "production-plus.expansion-none-seen" }
+  local hour = 0
+  for i = #(x and x.bases or {}), 1, -1 do
+    if tick - x.bases[i].tick <= 216000 then hour = hour + 1 else break end
+  end
+  ex.bases.caption = { "production-plus.expansion-bases-n", hour, x and x.total or 0 }
+  local lastb = x and x.bases[#x.bases]
+  ex.last.caption = lastb and { "production-plus.expansion-ago", fmt_duration((tick - lastb.tick) / 60) } or { "production-plus.expansion-none-seen" }
+  ex.map.enabled = lastb ~= nil
 end
 
 function EV.refresh(player, st)
@@ -2945,7 +3425,10 @@ function EV.refresh(player, st)
     row.bar.value = share
     row.val.caption = string.format("%.1f%%", share * 100)
   end
-  view.total.caption = string.format("%.1f%%", (EV.read(surface) or 0) * 100)
+  local e = EV.read(surface) or 0
+  view.total.caption = string.format("%.1f%%", e * 100)
+  EV.refresh_expansion(player, view, e)
+  EV.refresh_stages(view, e)
 end
 
 ---------------------------------------------------------------------------
@@ -3314,6 +3797,8 @@ script.on_event(defines.events.on_gui_click, function(e)
   elseif action == "to_plus" then
     player.opened = nil
     build_window(player)
+  elseif action == "evo_map" then
+    EV.show_base(player, st)
   elseif action == "settings" then
     set_settings_open(player, st, not st.settings_open)
   elseif action == "gscale_step" then

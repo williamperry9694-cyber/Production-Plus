@@ -3,7 +3,9 @@ Version: 0.2.1
 Date: 2026-11-20
   Features:
     - Pollution tab (Columns view): Emitted, Absorbed and Net panels from the game's pollution statistics, with a summary of totals and the pollution currently on the surface. Spores on Gleba are shown the same way.
-    - Evolution tab (Table view): enemy evolution over time for the selected surface, and how much of it comes from time, pollution and spawner kills. The mod records the history itself, starting from when this version is installed.
+    - Enemy tab (Table view): enemy evolution over time for the selected surface, and how much of it comes from time, pollution and spawner kills. The mod records the history itself, starting from when this version is installed.
+    - Expansion, as seen by your radars: an estimated countdown to the next expansion, the size of the last settler party, new bases seen (last hour and total) and a button to show the newest ones on the map.
+    - Evolution stage: one lane each for base types, every spawner type's units and worms, on a shared 0–100% scale, showing where each stage starts, what each lane makes right now and what comes next in that lane. Read from the game data, so modded enemies such as Bob's Enemies and Rampant, and Gleba, work too. Stage thresholds are also marked on the evolution graph.
     - Power is now only in Columns view, since its Table view was identical.
     - Settings button (gear) at the end of the control row. Opens a settings strip under it without changing the window size.
     - Graph scale setting: starts at 100%, adjustable from 50% to 300% in 5% steps, remembered across saves. While settings are open, every graph shows a yellow frame so you can see when it fits its box.
