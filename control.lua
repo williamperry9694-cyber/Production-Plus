@@ -28,6 +28,47 @@ local SCALES = {
 local SCALE_BY_KEY = {}
 for _, s in ipairs(SCALES) do SCALE_BY_KEY[s.key] = s end
 
+-- Tabs per view. A tab is only in Table view if it shows something different there.
+local TABS = {
+  columns = { "items", "fluids", "power", "pollution" },
+  table = { "items", "fluids", "evolution" },
+}
+
+-- What a row of a given tab is: items, fluids, or pollution sources (entities/tiles).
+local KIND = {}
+local PL = {}   -- Pollution tab (filled in further down)
+local EV = {}   -- Evolution tab (filled in further down)
+
+function KIND.proto(kind, name)
+  if kind == "items" then return prototypes.item[name] end
+  if kind == "fluids" then return prototypes.fluid[name] end
+  return prototypes.entity[name] or prototypes.tile[name]
+end
+
+function KIND.ok(kind, name)
+  if kind == "pollution" then return true end
+  return KIND.proto(kind, name) ~= nil
+end
+
+function KIND.sprite(kind, name)
+  local p
+  if kind == "items" then p = "item/" .. name
+  elseif kind == "fluids" then p = "fluid/" .. name
+  else
+    p = "entity/" .. name
+    if not helpers.is_valid_sprite_path(p) then p = "tile/" .. name end
+  end
+  return helpers.is_valid_sprite_path(p) and p or "utility/questionmark"
+end
+
+function KIND.in_view(view, kind)
+  for _, k in ipairs(TABS[view] or TABS.columns) do if k == kind then return true end end
+  return false
+end
+
+-- Pollution and evolution are per surface: "Universe" falls back to the player's surface.
+function KIND.per_surface(kind) return kind == "pollution" or kind == "evolution" end
+
 -- Vanilla graph line colours, in order.
 local LINE_COLORS = {}
 for i, c in ipairs({
@@ -92,13 +133,14 @@ end
 -- Saved-data format. Bump DATA_FORMAT whenever stored state changes shape (even within
 -- the same mod version): the next tick closes open windows, resets everything that is
 -- rebuilt anyway (windows, graphs, scans) and validates what the player chose.
-local DATA_FORMAT = 5
+local DATA_FORMAT = 7
 
 local function valid_key(kind, key)
   if type(key) ~= "string" then return false end
   local name, q = key:match("^(.*)|([^|]*)$")
   if not name then return false end
   if kind == "fluids" then return prototypes.fluid[name] ~= nil end
+  if kind == "pollution" then return true end
   if not prototypes.item[name] then return false end
   return q == "*" or prototypes.quality[q] ~= nil
 end
@@ -113,6 +155,8 @@ local function migrate()
   for _, player in pairs(game.players) do
     local w = player.gui.screen[WINDOW]
     if w and w.valid then w.destroy() end
+    local sw = player.gui.screen.pp_settings
+    if sw and sw.valid then sw.destroy() end
     local rel = player.gui.relative.pp_anchor
     if rel and rel.valid then rel.destroy() end
   end
@@ -127,12 +171,19 @@ local function migrate()
     st.buf, st.buf_sig, st.render, st.selected = nil, nil, nil, nil
     st.raw_list, st.raw_map, st.slice, st.discovered = nil, nil, nil, nil
     st.hover, st.graph_n, st.surface_names = nil, nil, nil
+    st.evo_view, st.pl_sum = nil, nil
     st.allow_vanilla, st.closed_tick = false, nil
+    st.settings_open, st.gear = nil, nil
+    -- fallbacks only; the real values live in hidden per-player mod settings
+    if st.window_mode ~= "plus" and st.window_mode ~= "vanilla" and st.window_mode ~= "plus-only" then st.window_mode = nil end
+    if storage.format ~= nil and storage.format < 7 then st.window_mode = nil end -- 0.2.1 test build kept it here
+    if type(st.gscale) ~= "number" or st.gscale < 50 or st.gscale > 300 then st.gscale = nil end
 
     -- choices: keep, but only if still valid
     if st.view ~= "columns" and st.view ~= "table" then st.view = "columns" end
     if st.mode ~= "number" and st.mode ~= "percent" then st.mode = "number" end
-    if st.kind ~= "items" and st.kind ~= "fluids" and st.kind ~= "power" then st.kind = "items" end
+    if st.view ~= "columns" and st.view ~= "table" then st.view = "columns" end
+    if not KIND.in_view(st.view, st.kind) then st.kind = "items" end
     if not SCALE_BY_KEY[st.scale] then st.scale = "one_minute" end
     if st.surface and st.surface ~= UNIVERSE and not game.surfaces[st.surface] then st.surface = nil end
     if type(st.search) ~= "string" or st.search == "" then st.search = nil end
@@ -158,7 +209,7 @@ local function migrate()
 
     if type(st.pins) == "table" then
       local pins = {}
-      for _, kind in ipairs({ "items", "fluids" }) do
+      for _, kind in ipairs({ "items", "fluids", "pollution" }) do
         local list = {}
         for _, key in ipairs(type(st.pins[kind]) == "table" and st.pins[kind] or {}) do
           if valid_key(kind, key) then list[#list + 1] = key end
@@ -250,7 +301,9 @@ end
 local function stats_list(player, st)
   local force = player.force
   local surfaces
-  if st.surface == UNIVERSE then
+  if KIND.per_surface(st.kind) then
+    surfaces = { resolve_surface(player, st) or player.surface }
+  elseif st.surface == UNIVERSE then
     surfaces = {}
     for _, s in pairs(game.surfaces) do
       if s.valid and s.name ~= GRAPH_SURFACE then surfaces[#surfaces + 1] = s end
@@ -262,6 +315,8 @@ local function stats_list(player, st)
   for _, s in ipairs(surfaces) do
     if st.kind == "items" then
       out[#out + 1] = force.get_item_production_statistics(s)
+    elseif st.kind == "pollution" then
+      out[#out + 1] = game.get_pollution_statistics(s)
     else
       out[#out + 1] = force.get_fluid_production_statistics(s)
     end
@@ -314,8 +369,7 @@ local function collect(player, st, stats)
     end
     for key, nq in pairs(keys) do
       local n, q = nq[1], nq[2]
-      local proto = st.kind == "items" and prototypes.item[n] or prototypes.fluid[n]
-      if proto then
+      if KIND.ok(st.kind, n) then
         local id = q and { name = n, quality = q } or n
         local row = rows[key]
         if not row then
@@ -426,7 +480,7 @@ local function item_order(kind, name, quality)
   local ck = kind .. "|" .. name
   local base = item_order_cache[ck]
   if not base then
-    local proto = kind == "items" and prototypes.item[name] or prototypes.fluid[name]
+    local proto = KIND.proto(kind, name)
     if proto then
       base = (proto.group and proto.group.order or "") .. "|" .. (proto.subgroup and proto.subgroup.order or "") .. "|" .. (proto.order or "") .. "|" .. name
     else
@@ -557,7 +611,9 @@ end
 
 local TR_PER_TICK = 200
 
-local function tr_key(kind, name) return (kind == "fluids" and "f:" or "i:") .. name end
+local function tr_key(kind, name)
+  return (kind == "fluids" and "f:" or kind == "pollution" and "p:" or "i:") .. name
+end
 
 local function queue_translations(player)
   storage.tr = storage.tr or {}
@@ -583,7 +639,7 @@ local function translation_step()
       local strings, keys = {}, {}
       for k = q.i, last do
         local kind, name = q.list[k][1], q.list[k][2]
-        local proto = kind == "items" and prototypes.item[name] or prototypes.fluid[name]
+        local proto = KIND.proto(kind, name)
         if proto then
           strings[#strings + 1] = proto.localised_name
           keys[#keys + 1] = tr_key(kind, name)
@@ -693,7 +749,7 @@ local function net_color(row)
 end
 
 local function display_name(st, row)
-  local proto = st.kind == "items" and prototypes.item[row.name] or prototypes.fluid[row.name]
+  local proto = KIND.proto(st.kind, row.name)
   local name = proto and proto.localised_name or row.name
   if row.quality and row.quality ~= "normal" and prototypes.quality[row.quality] then
     return { "", name, " (", prototypes.quality[row.quality].localised_name, ")" }
@@ -733,7 +789,6 @@ end
 -- samples are read from the API.
 ---------------------------------------------------------------------------
 
-local CAMERA_ZOOM = 0.8   -- measured: camera tile size already includes UI scale (x1.25)
 local SAMPLES = 300
 local GROUP = 2           -- samples per drawn point
 local POINTS = SAMPLES / GROUP
@@ -747,6 +802,7 @@ local function gdx(g) return (g.w - M_RIGHT - M_LEFT) / (POINTS - 1) end
 
 local function graph_key(st)
   if st.kind == "power" then return "one_minute" end   -- power graph is sampled by the mod at 1m resolution
+  if st.kind == "evolution" and (st.scale == "five_seconds" or st.scale == "one_minute") then return "ten_minutes" end
   return st.scale == "all" and "one_thousand_hours" or st.scale
 end
 
@@ -784,6 +840,20 @@ local function read_buffer(st, stats, desc, n)
   if not b then
     b = { data = {} }
     bufs[desc.bkey] = b
+  end
+  if desc.evo then
+    -- recorded by the mod every sample (see EV.record), read straight from storage
+    local rec = storage.evo and storage.evo[desc.surface]
+    local ring = rec and rec[graph_key(st)]
+    b.data = {}
+    if ring then
+      for m = n - SAMPLES - SMOOTH - GROUP, n do
+        local v = ring[m]
+        if v then b.data[m] = { v } end
+      end
+    end
+    b.head = n
+    return
   end
   if desc.custom then
     -- sampled by the mod (no history in the game's statistics for this)
@@ -864,7 +934,11 @@ local function destroy_graph_objects(g)
 end
 
 local function clear_graphs(st)
-  for _, g in pairs(st.graphs or {}) do destroy_graph_objects(g) end
+  for _, g in pairs(st.graphs or {}) do
+    destroy_graph_objects(g)
+    if g.fit and g.fit.valid then g.fit.destroy() end
+    g.fit = nil
+  end
   st.graphs = {}
 end
 
@@ -891,22 +965,19 @@ local function seg_style(g, si)
   return { r = base.r * 0.3, g = base.g * 0.3, b = base.b * 0.3 }, 1
 end
 
-local ICON_PX = 20
-local ICON_GAP = 6        -- leader length before the icon
-local ICON_SPACING = 21   -- min vertical distance between icons
+local ICN = { PX = 20, GAP = 6, SPACING = 21 }
 
 local function icon_sprite(st, desc)
   if desc.sprite then
     return helpers.is_valid_sprite_path(desc.sprite) and desc.sprite or "utility/questionmark"
   end
-  local p = (st.kind == "items" and "item/" or "fluid/") .. desc.name
-  return helpers.is_valid_sprite_path(p) and p or "utility/questionmark"
+  return KIND.sprite(st.kind, desc.name)
 end
 
 -- Create the icon objects (sprite, optional quality badge, leader) for each series.
 local function create_icons(st, g, surface, players)
   g.icons = {}
-  local scale = ICON_PX / 32   -- icons render one tile (32 px) per scale unit
+  local scale = ICN.PX / 32   -- icons render one tile (32 px) per scale unit
   for si, desc in ipairs(g.descs) do
     local objs = {}
     objs.lead = rendering.draw_line { color = LINE_COLORS[si], width = 1, from = { 0, 0 }, to = { 0, 0 }, surface = surface, players = players }
@@ -927,11 +998,11 @@ local function layout_icons(g, o, qh)
     order[#order + 1] = si
   end
   table.sort(order, function(a, b) return g.icons[a].ly < g.icons[b].ly end)
-  local top, bottom = ICON_PX / 2, GRAPH_H - M_BOTTOM
+  local top, bottom = ICN.PX / 2, GRAPH_H - M_BOTTOM
   local last = -1e9
   for _, si in ipairs(order) do
     local ic = g.icons[si]
-    local y = math.max(ic.ly, last + ICON_SPACING, top)
+    local y = math.max(ic.ly, last + ICN.SPACING, top)
     ic.y = y
     last = y
   end
@@ -952,9 +1023,9 @@ local function place_statics(g, o, now_q)
   local x1 = g.w - M_RIGHT
   for _, ic in pairs(g.icons or {}) do
     local objs = ic.objs
-    if objs.lead.valid then objs.lead.to = at({ x1 + ICON_GAP, ic.y }) end
-    if objs.spr.valid then objs.spr.target = at({ x1 + ICON_GAP + ICON_PX / 2 + 2, ic.y }) end
-    if objs.q and objs.q.valid then objs.q.target = at({ x1 + ICON_GAP + 2 + ICON_PX / 4, ic.y + ICON_PX / 4 }) end
+    if objs.lead.valid then objs.lead.to = at({ x1 + ICN.GAP, ic.y }) end
+    if objs.spr.valid then objs.spr.target = at({ x1 + ICN.GAP + ICN.PX / 2 + 2, ic.y }) end
+    if objs.q and objs.q.valid then objs.q.target = at({ x1 + ICN.GAP + 2 + ICN.PX / 4, ic.y + ICN.PX / 4 }) end
   end
   for _, s in ipairs(g.statics) do
     local obj = s.obj
@@ -972,6 +1043,10 @@ local function place_statics(g, o, now_q)
   end
   if g.cam and g.cam.valid then
     g.cam.position = { vl + g.w * PX / 2, o.y + GRAPH_H * PX / 2 }
+  end
+  if g.fit and g.fit.valid then
+    g.fit.left_top = { vl + PX, o.y + PX }
+    g.fit.right_bottom = { vl + (g.w - 1) * PX, o.y + (GRAPH_H - 1) * PX }
   end
 end
 
@@ -1057,10 +1132,10 @@ local function full_draw(player, st, slot, g, n)
     static("line", { x0, y }, { x1, y },
       rendering.draw_line { color = (g.signed and i == 0) and CLR.ZERO or CLR.GRID, width = 1, from = P, to = P, surface = surface, players = players })
     static("text", { x0 - 4, y }, nil,
-      rendering.draw_text { text = (g.unit == "W" and fmt_power or axis_label)(v), color = CLR.LABEL, target = P, alignment = "right", vertical_alignment = "middle", scale = 0.8, surface = surface, players = players })
+      rendering.draw_text { text = g.unit == "W" and fmt_power(v) or (axis_label(v) .. (g.unit == "%" and "%" or "")), color = CLR.LABEL, target = P, alignment = "right", vertical_alignment = "middle", scale = 0.8, surface = surface, players = players })
   end
 
-  local scale = SCALE_BY_KEY[st.kind == "power" and "one_minute" or st.scale]
+  local scale = SCALE_BY_KEY[graph_key(st)]
   local axis = scale.axis or 1000
   for i = 0, 10 do
     local x = x0 + (x1 - x0) * i / 10
@@ -1254,9 +1329,76 @@ local HOT_ROWS = 20        -- rows per panel refreshed every LIST_INTERVAL
 local LIST_INTERVAL = 10   -- ticks between hot-row refreshes
 local FULL_INTERVAL = 60   -- ticks between full refreshes (re-sort, all rows)
 
+local WINDOW_MODES = { "plus", "vanilla", "plus-only" }
+
+-- Settings from the strip are stored in hidden per-player mod settings, so they
+-- follow the player across saves. storage is only a fallback if a write fails.
+local function read_setting(player, name)
+  local ok, v = pcall(function() return player.mod_settings[name].value end)
+  if ok then return v end
+end
+
+local function write_setting(player, name, value)
+  return pcall(function() player.mod_settings[name] = { value = value } end)
+end
+
 local function window_mode(player)
-  local s = settings.get_player_settings(player)["pp-window-mode"]
-  return s and s.value or "plus"
+  local st = get_state(player.index)
+  local m = st.window_mode or read_setting(player, "pp-window-mode")
+  if m ~= "vanilla" and m ~= "plus-only" then m = "plus" end
+  return m
+end
+
+local function set_window_mode(player, st, m)
+  st.window_mode = (not write_setting(player, "pp-window-mode", m)) and m or nil
+end
+
+-- Graph scale: starts at 100%, adjusted in 5% steps, remembered per player.
+local GS = { MIN = 50, MAX = 300, STEP = 5 }
+
+local function graph_scale(player, st)
+  local v = st.gscale or read_setting(player, "pp-graph-scale")
+  if type(v) ~= "number" then v = 100 end
+  v = math.floor(v / GS.STEP + 0.5) * GS.STEP
+  return math.max(GS.MIN, math.min(GS.MAX, v))
+end
+
+local function set_graph_scale(player, st, v)
+  st.gscale = (not write_setting(player, "pp-graph-scale", v)) and v or nil
+end
+
+local function camera_zoom(player, st)
+  return graph_scale(player, st) / 100
+end
+
+local function ui_scale(player)
+  local ok, z = pcall(function() return player.display_scale end)
+  return (ok and type(z) == "number" and z > 0) and z or 1
+end
+
+CLR.FIT = { 1, 0.85, 0.2 }
+
+local function add_fit(player, g)
+  if (g.fit and g.fit.valid) or not (g.cam and g.cam.valid) then return end
+  local p = g.cam.position
+  local px, py = p.x or p[1], p.y or p[2]
+  local hw, hh = g.w * PX / 2, GRAPH_H * PX / 2
+  g.fit = rendering.draw_rectangle {
+    color = CLR.FIT, width = 2, filled = false,
+    left_top = { px - hw + PX, py - hh + PX }, right_bottom = { px + hw - PX, py + hh - PX },
+    surface = GRAPH_SURFACE, players = { player },
+  }
+end
+
+local function set_fit(player, st, on)
+  for _, g in pairs(st.graphs or {}) do
+    if on then
+      add_fit(player, g)
+    elseif g.fit then
+      if g.fit.valid then g.fit.destroy() end
+      g.fit = nil
+    end
+  end
 end
 
 local function toggle_button(parent, caption, tags, on, tooltip)
@@ -1315,16 +1457,19 @@ end
 local function add_camera(parent, player, st, slot, panel, width)
   width = width or GRAPH_W
   local o = graph_origin(player.index, slot)
+  local old = st.graphs[slot]
+  if old and old.fit and old.fit.valid then old.fit.destroy() end
   local cam = parent.add {
     type = "camera", name = "pp_cam_" .. slot,
     position = { o.x + width * PX / 2, o.y + GRAPH_H * PX / 2 },
     surface_index = graph_surface().index,
-    zoom = CAMERA_ZOOM,
+    zoom = camera_zoom(player, st),
   }
   cam.style.width = width
   cam.style.height = GRAPH_H
   st.graphs[slot] = { cam = cam, w = width, panel = panel, signed = (panel == "net"), descs = {}, dirty = true,
     statics = {}, segs = {}, vals = {} }
+  if st.settings_open then add_fit(player, st.graphs[slot]) end
   return cam
 end
 
@@ -1336,8 +1481,7 @@ end
 local function set_identity(sh, b, st, r, panel)
   if sh.key == r.key then return end
   sh.key = r.key
-  local sprite = (st.kind == "items" and "item/" or "fluid/") .. r.name
-  b.sprite = helpers.is_valid_sprite_path(sprite) and sprite or "utility/questionmark"
+  b.sprite = KIND.sprite(st.kind, r.name)
   b.quality = (r.quality and r.quality ~= "normal") and r.quality or nil
   b.tooltip = { "production-plus.cell-tooltip", display_name(st, r) }
   b.tags = { pp = "pick", panel = panel, key = r.key }
@@ -1568,6 +1712,10 @@ local function build_panel(parent, player, st, panel, slot, title)
   add_camera(f, player, st, slot, panel)
   local sp = f.add { type = "scroll-pane", name = "pp_sp", style = "statistics_scroll_pane", vertical_scroll_policy = "auto-and-reserve-space", horizontal_scroll_policy = "never" }
   sp.style.height = 560
+  if st.kind == "pollution" and panel == "net" then
+    sp.style.height = 560 - PL.SUMMARY_H
+    PL.build_summary(f, st, sp)
+  end
   local t = sp.add { type = "table", name = "pp_t", column_count = 2 }
   t.style.horizontal_spacing = 8
   t.style.vertical_spacing = 8
@@ -1725,8 +1873,7 @@ local function discover_keys(st, stats)
   local function add(n, q)
     local k = row_key(n, q)
     if map[k] then return end
-    local proto = st.kind == "items" and prototypes.item[n] or prototypes.fluid[n]
-    if not proto then return end
+    if not KIND.ok(st.kind, n) then return end
     local r = { name = n, quality = q, key = k, pn = 0, cn = 0, p = 0, c = 0, net = 0, nn = 0 }
     map[k] = r
     list[#list + 1] = r
@@ -1772,6 +1919,7 @@ local function refresh(player, mode)
   if mode == "full" or not st.raw_list then
     st.raw_list = collect(player, st, stats)
     st.raw_map = by_key_of(st.raw_list)
+    if st.kind == "pollution" then PL.translate(player, st.raw_list) end
     st.slice, st.discovered, st.fresh = 0, game.tick, nil
     mode = "full"
   else
@@ -1787,10 +1935,12 @@ local function refresh(player, mode)
     if mode == "sort" and game.tick - (st.discovered or 0) >= DISCOVER_INTERVAL then
       discover_keys(st, stats)
       st.discovered = game.tick
+      if st.kind == "pollution" then PL.translate(player, st.raw_list) end
     end
   end
 
   local resort = mode ~= "hot"
+  if resort and st.kind == "pollution" then PL.update_summary(player, st) end
   local searching = resort and st.search and st.search ~= ""
   local percent = st.mode == "percent"
   local cache = {}
@@ -1871,7 +2021,8 @@ local function continue_views(st)
   end
 end
 
-local build_window   -- defined in the Window section
+local build_window
+local build_settings  -- defined in the Settings section
 
 ---------------------------------------------------------------------------
 -- Power tab: every electric network on the surface in one list
@@ -2567,6 +2718,7 @@ local function export_csv(player, st)
     for i, v in ipairs({ ... }) do parts[i] = csv_field(v) end
     lines[#lines + 1] = table.concat(parts, ",")
   end
+  if st.kind == "evolution" then return end
   if st.kind == "power" then
     local ps = power_state(st)
     add("network", "production_w", "demand_w", "satisfaction", "stored_j", "capacity_j", "empty_in_s")
@@ -2598,6 +2750,204 @@ local function export_csv(player, st)
   player.print { "production-plus.csv-written", file }
 end
 
+
+---------------------------------------------------------------------------
+-- Pollution tab: Emitted / Absorbed / Net, from the game's pollution statistics.
+-- Uses the same rows, graphs and refresh as Items; only the Net summary is extra.
+---------------------------------------------------------------------------
+
+PL.SUMMARY_H = 52
+
+function PL.build_summary(f, st, before)
+  local box = f.add { type = "frame", style = "pp_cell", direction = "vertical", index = before.get_index_in_parent() }
+  box.style.height = PL.SUMMARY_H
+  box.style.horizontally_stretchable = true
+  box.style.padding = { 4, 12, 4, 12 }
+  local function line()
+    local l = box.add { type = "flow", direction = "horizontal" }
+    l.style.horizontal_spacing = 24
+    return l
+  end
+  local a, b = line(), line()
+  st.pl_sum = {
+    e = a.add { type = "label" }, a = a.add { type = "label" },
+    n = b.add { type = "label" }, s = b.add { type = "label" },
+  }
+  for _, l in pairs(st.pl_sum) do l.style.width = 240 end
+end
+
+function PL.update_summary(player, st)
+  local sum = st.pl_sum
+  if not (sum and sum.e and sum.e.valid) then return end
+  local e, a = 0, 0
+  for _, r in ipairs(st.raw_list or {}) do e, a = e + r.p, a + r.c end
+  local net = e - a
+  local surface = resolve_surface(player, st) or player.surface
+  local ok, total = pcall(function() return surface.get_total_pollution() end)
+  local function set(l, key, v, color)
+    l.caption = { "", { "production-plus." .. key }, ": [font=default-bold]", v, "[/font]" }
+    if color then l.style.font_color = color end
+  end
+  set(sum.e, "emitted", fmt_amount(e))
+  set(sum.a, "absorbed", fmt_amount(a))
+  set(sum.n, "net", fmt_net(net))
+  set(sum.s, "pollution-on-surface", ok and short(total or 0) or "?")
+end
+
+-- Pollution sources aren't in the startup translation list (that's items and fluids):
+-- translate the ones that show up, once, for search.
+function PL.translate(player, rows)
+  local done = storage.tr and storage.tr[player.index]
+  if not done then return end
+  storage.tr_ids = storage.tr_ids or {}
+  storage.tr_ids[player.index] = storage.tr_ids[player.index] or {}
+  local strings, keys = {}, {}
+  for _, r in ipairs(rows) do
+    local k = tr_key("pollution", r.name)
+    if done[k] == nil then
+      local proto = KIND.proto("pollution", r.name)
+      done[k] = string.lower(r.name)   -- until the translation arrives
+      if proto then
+        strings[#strings + 1] = proto.localised_name
+        keys[#keys + 1] = k
+      end
+    end
+  end
+  if #strings > 0 then
+    local ids = player.request_translations(strings)
+    for i, id in ipairs(ids or {}) do storage.tr_ids[player.index][id] = keys[i] end
+  end
+end
+
+---------------------------------------------------------------------------
+-- Evolution tab (Table view only). The game keeps no evolution history, so the
+-- mod records one value per graph sample for each surface with enemies.
+---------------------------------------------------------------------------
+
+EV.EVERY = 120   -- ticks; the finest scale shown is 10m (one sample per 120 ticks)
+EV.SCALES = { "ten_minutes", "one_hour", "ten_hours", "fifty_hours", "two_hundred_fifty_hours", "one_thousand_hours" }
+EV.KEEP = SAMPLES + SMOOTH + GROUP + 4
+
+function EV.read(surface, what)
+  local enemy = game.forces.enemy
+  if not (enemy and surface and surface.valid) then return nil end
+  local ok, v = pcall(function()
+    if what == "time" then return enemy.get_evolution_factor_by_time(surface)
+    elseif what == "pollution" then return enemy.get_evolution_factor_by_pollution(surface)
+    elseif what == "kills" then return enemy.get_evolution_factor_by_killing_spawners(surface)
+    end
+    return enemy.get_evolution_factor(surface)
+  end)
+  return ok and type(v) == "number" and v or nil
+end
+
+function EV.record(tick)
+  storage.evo = storage.evo or {}
+  for _, s in pairs(game.surfaces) do
+    if s.valid and s.name ~= GRAPH_SURFACE and not s.platform then
+      local rec = storage.evo[s.name]
+      local v = EV.read(s)
+      if v and (v > 0 or rec) then
+        if not rec then rec = {}; storage.evo[s.name] = rec end
+        for _, key in ipairs(EV.SCALES) do
+          local t = TICKS_PER_SAMPLE[key]
+          if tick % t == 0 then
+            local ring = rec[key]
+            if not ring then ring = {}; rec[key] = ring end
+            local n = tick / t
+            ring[n] = v * 100
+            ring[n - EV.KEEP] = nil
+          end
+        end
+      end
+    end
+  end
+end
+
+EV.ROWS = { { key = "time", color = { 0.55, 0.75, 1 } }, { key = "pollution", color = { 0.9, 0.45, 0.35 } }, { key = "kills", color = { 0.9, 0.75, 0.3 } } }
+
+function EV.build(parent, player, st)
+  local surface = resolve_surface(player, st) or player.surface
+  local f = parent.add { type = "frame", name = "pp_panel_table", direction = "vertical", style = "inside_deep_frame" }
+  f.style.width = TG.TABLE_W
+  f.style.height = TG.TABLE_H
+  local h = f.add { type = "flow", direction = "horizontal" }
+  h.style.padding = { 4, 8, 4, 12 }
+  h.style.height = 36
+  h.style.vertical_align = "center"
+  h.add { type = "label", style = "caption_label", caption = { "production-plus.evolution-title", surface_caption(surface) } }
+
+  local v = EV.read(surface)
+  if not v or (v <= 0 and not (storage.evo and storage.evo[surface.name])) then
+    local l = f.add { type = "label", caption = { "production-plus.evolution-none" } }
+    l.style.padding = { 24, 24 }
+    l.style.font_color = CLR.LABEL
+    st.evo_view = { none = true }
+    return
+  end
+
+  add_camera(f, player, st, 4, "evolution", TG.TABLE_W)
+  local g = st.graphs[4]
+  g.unit = "%"
+  g.descs = { { custom = true, evo = true, surface = surface.name, bkey = "evo|" .. surface.name, key = "evo", field = 1,
+    sprite = pick_sprite("entity/small-biter", "item/biter-egg", "utility/questionmark") } }
+  g.sig, g.dirty = "evo|" .. surface.name, true
+
+  local t = f.add { type = "table", column_count = 3 }
+  t.style.padding = { 16, 24, 8, 24 }
+  t.style.horizontal_spacing = 24
+  t.style.vertical_spacing = 14
+  t.style.column_alignments[3] = "right"
+  local function head(key, w)
+    local l = t.add { type = "label", style = "caption_label", caption = { "production-plus." .. key } }
+    l.style.width = w
+    l.style.font_color = { 0.85, 0.85, 0.85 }
+  end
+  local BAR_W = TG.TABLE_W - 48 - 260 - 160 - 48
+  head("evolution-source", 260)
+  head("evolution-share", BAR_W)
+  head("evolution-value", 160)
+  local view = { surface = surface.name, rows = {} }
+  for _, r in ipairs(EV.ROWS) do
+    local name = t.add { type = "label", caption = { "production-plus.evolution-" .. r.key } }
+    name.style.width = 260
+    local bar = t.add { type = "progressbar", value = 0 }
+    bar.style.width = BAR_W
+    bar.style.color = r.color
+    local val = t.add { type = "label", caption = "" }
+    val.style.width = 160
+    val.style.horizontal_align = "right"
+    view.rows[r.key] = { bar = bar, val = val }
+  end
+  local tl = t.add { type = "label", style = "caption_label", caption = { "production-plus.evolution-total" } }
+  tl.style.width = 260
+  t.add { type = "empty-widget" }
+  local tv = t.add { type = "label", style = "caption_label", caption = "" }
+  tv.style.width = 160
+  tv.style.horizontal_align = "right"
+  view.total = tv
+  st.evo_view = view
+end
+
+function EV.refresh(player, st)
+  local view = st.evo_view
+  if not view or view.none or not (view.total and view.total.valid) then return end
+  local surface = game.surfaces[view.surface]
+  if not surface then return end
+  local parts, sum = {}, 0
+  for _, r in ipairs(EV.ROWS) do
+    parts[r.key] = EV.read(surface, r.key) or 0
+    sum = sum + parts[r.key]
+  end
+  for _, r in ipairs(EV.ROWS) do
+    local row = view.rows[r.key]
+    local share = sum > 0 and parts[r.key] / sum or 0
+    row.bar.value = share
+    row.val.caption = string.format("%.1f%%", share * 100)
+  end
+  view.total.caption = string.format("%.1f%%", (EV.read(surface) or 0) * 100)
+end
+
 ---------------------------------------------------------------------------
 -- Window
 ---------------------------------------------------------------------------
@@ -2612,6 +2962,7 @@ build_window = function(player)
   st.power_view = nil
   st.raw_list, st.raw_map = nil, nil
   st.hover = nil
+  st.evo_view, st.pl_sum = nil, nil
 
   local frame = player.gui.screen.add { type = "frame", name = WINDOW, direction = "vertical" }
   if location then frame.location = location else frame.auto_center = true end
@@ -2628,8 +2979,9 @@ build_window = function(player)
   d1.style.height = 24
   d1.drag_target = frame
   local surface = resolve_surface(player, st)
+  if not surface and KIND.per_surface(st.kind) then surface = player.surface end
   local where = surface and surface_caption(surface) or { "production-plus.universe" }
-  local title = bar.add { type = "label", caption = { "production-plus.title", where }, style = "frame_title" }
+  local title = bar.add { type = "label", caption = { (st.kind == "pollution" or st.kind == "evolution") and ("production-plus.title-" .. st.kind) or "production-plus.title", where }, style = "frame_title" }
   title.drag_target = frame
   local d2 = bar.add { type = "empty-widget", style = "draggable_space_header" }
   d2.style.horizontally_stretchable = true
@@ -2645,11 +2997,16 @@ build_window = function(player)
   row.style.horizontal_spacing = 4
   row.style.top_margin = 4
   local power = st.kind == "power"
+  local evo = st.kind == "evolution"
+  local gk = graph_key(st)
   for _, s in ipairs(SCALES) do
-    local b = toggle_button(row, s.label, { pp = "scale", scale = s.key }, st.scale == s.key and not power)
+    local on = st.scale == s.key
+    if evo and gk == "ten_minutes" and st.scale ~= "ten_minutes" then on = s.key == "ten_minutes" end
+    local b = toggle_button(row, s.label, { pp = "scale", scale = s.key }, on and not power)
     b.style.width = 96
-    b.enabled = not power
+    b.enabled = not power and not (evo and (s.key == "five_seconds" or s.key == "one_minute"))
   end
+  power = power or evo   -- the controls below don't apply to Power or Evolution
   local push = row.add { type = "empty-widget" }
   push.style.horizontally_stretchable = true
   -- search
@@ -2660,7 +3017,9 @@ build_window = function(player)
   local clear = row.add { type = "sprite-button", style = "tool_button", sprite = "utility/close",
     tooltip = { "production-plus.search-clear-tooltip" }, tags = { pp = "search_clear" } }
   clear.enabled = not power
-  row.add { type = "button", caption = { "production-plus.csv" }, tooltip = { "production-plus.csv-tooltip" }, tags = { pp = "csv" } }.style.minimal_width = 0
+  local csv = row.add { type = "button", caption = { "production-plus.csv" }, tooltip = { "production-plus.csv-tooltip" }, tags = { pp = "csv" } }
+  csv.style.minimal_width = 0
+  csv.enabled = not evo
   local pb = toggle_button(row, "%", { pp = "mode", mode = "percent" }, st.mode == "percent" and not power, { "production-plus.percent-tooltip" })
   pb.enabled = not power
   local nb = toggle_button(row, "#", { pp = "mode", mode = "number" }, st.mode == "number" and not power, { "production-plus.number-tooltip" })
@@ -2677,13 +3036,20 @@ build_window = function(player)
   if window_mode(player) ~= "plus-only" then
     row.add { type = "button", caption = { "production-plus.vanilla-view" }, tooltip = { "production-plus.vanilla-view-tooltip" }, tags = { pp = "vanilla" } }
   end
+  local gear = row.add { type = "sprite-button", style = "button", sprite = "pp-gear", tags = { pp = "settings" },
+    tooltip = { "production-plus.settings-tooltip" } }
+  gear.toggled = st.settings_open == true
+  gear.style.width = 32
+  gear.style.height = 28
+  gear.style.padding = 2
+  st.gear = gear
 
   -- Items / Fluids as real tabs
   local tp = frame.add { type = "tabbed-pane", name = "pp_tabs", tags = { pp = "kind" } }
   tp.style.top_margin = 8
   local body
   local sel_index = 1
-  for i, k in ipairs({ "items", "fluids", "power" }) do
+  for i, k in ipairs(TABS[st.view] or TABS.columns) do
     local tab = tp.add { type = "tab", caption = { "production-plus." .. k } }
     local content
     if st.kind == k then
@@ -2697,29 +3063,38 @@ build_window = function(player)
   end
   tp.selected_tab_index = sel_index
 
-  if power then
+  if st.kind == "power" then
     build_power(body, player, st)
+  elseif evo then
+    EV.build(body, player, st)
   elseif st.view == "columns" then
     local panels = body.add { type = "flow", name = "pp_panels", direction = "horizontal" }
     panels.style.horizontal_spacing = 12
-    build_panel(panels, player, st, "production", 1, { "production-plus.production" })
-    build_panel(panels, player, st, "consumption", 2, { "production-plus.consumption" })
+    local pol = st.kind == "pollution"
+    build_panel(panels, player, st, "production", 1, { pol and "production-plus.emitted" or "production-plus.production" })
+    build_panel(panels, player, st, "consumption", 2, { pol and "production-plus.absorbed" or "production-plus.consumption" })
     build_panel(panels, player, st, "net", 3, { "production-plus.net" })
   else
     build_table(body, player, st)
   end
 
   queue_translations(player)
-  if power then power_refresh(player, st) else refresh(player, true) end
+  if st.kind == "power" then power_refresh(player, st)
+  elseif evo then EV.refresh(player, st)
+  else refresh(player, true) end
   graph_tick(player, st, "open")
   storage.open[player.index] = true
   player.opened = frame
+  if st.settings_open then build_settings(player, st) end
 end
 
 local function close_window(player)
   local frame = player.gui.screen[WINDOW]
   if frame and frame.valid then frame.destroy() end
+  local sw = player.gui.screen.pp_settings
+  if sw and sw.valid then sw.destroy() end
   local st = get_state(player.index)
+  st.settings_open = nil
   clear_graphs(st)
   st.views = {}
   st.power_view = nil
@@ -2752,16 +3127,120 @@ local function update_all_anchors()
   for _, player in pairs(game.players) do update_anchor(player) end
 end
 
+---------------------------------------------------------------------------
+-- Settings strip (gear button). Floats under the control row so the window
+-- never changes size. Everything here is saved per player in storage.
+---------------------------------------------------------------------------
+
+local SETTINGS = "pp_settings"
+local SETTINGS_W = 460
+
+local function destroy_settings(player)
+  local f = player.gui.screen[SETTINGS]
+  if f and f.valid then f.destroy() end
+end
+
+local function place_settings(player)
+  local f, main = player.gui.screen[SETTINGS], player.gui.screen[WINDOW]
+  if not (f and f.valid and main and main.valid) then return end
+  local sc = ui_scale(player)
+  local loc = main.location or { x = 0, y = 0 }
+  f.location = {
+    x = loc.x + math.floor((TG.TABLE_W + 24 - 12 - SETTINGS_W) * sc),
+    y = loc.y + math.floor(78 * sc),
+  }
+end
+
+local function pct_text(n) return string.format("%d%%", n) end
+
+build_settings = function(player, st)
+  destroy_settings(player)
+  local main = player.gui.screen[WINDOW]
+  if not (main and main.valid) then return end
+  local f = player.gui.screen.add { type = "frame", name = SETTINGS, direction = "vertical",
+    caption = { "production-plus.settings" } }
+  f.style.width = SETTINGS_W
+  local inner = f.add { type = "frame", style = "inside_shallow_frame_with_padding", direction = "vertical" }
+  inner.style.horizontally_stretchable = true
+  local t = inner.add { type = "table", column_count = 2 }
+  t.style.horizontal_spacing = 16
+  t.style.vertical_spacing = 8
+  t.style.column_alignments[1] = "middle-left"
+  t.style.column_alignments[2] = "middle-left"
+
+  -- Window mode
+  t.add { type = "label", caption = { "production-plus.window-mode" }, tooltip = { "production-plus.window-mode-tooltip" } }
+  local idx = 1
+  for i, m in ipairs(WINDOW_MODES) do if m == window_mode(player) then idx = i end end
+  local dd = t.add { type = "drop-down", selected_index = idx, tags = { pp = "wmode" },
+    tooltip = { "production-plus.window-mode-tooltip" },
+    items = { { "production-plus.wmode-plus" }, { "production-plus.wmode-vanilla" }, { "production-plus.wmode-plus-only" } } }
+  dd.style.width = 240
+
+  -- Graph scale
+  t.add { type = "label", caption = { "production-plus.graph-scale" }, tooltip = { "production-plus.graph-scale-tooltip" } }
+  local r = t.add { type = "flow", direction = "horizontal" }
+  r.style.vertical_align = "center"
+  r.style.horizontal_spacing = 4
+  local cur = graph_scale(player, st)
+  local minus = r.add { type = "button", caption = "-", tags = { pp = "gscale_step", dir = -1 },
+    tooltip = { "production-plus.graph-minus-tooltip" } }
+  minus.style.width = 28
+  minus.enabled = cur > GS.MIN
+  local l = r.add { type = "label", caption = pct_text(cur), tooltip = { "production-plus.graph-scale-tooltip" } }
+  l.style.width = 52
+  l.style.horizontal_align = "center"
+  local plus = r.add { type = "button", caption = "+", tags = { pp = "gscale_step", dir = 1 },
+    tooltip = { "production-plus.graph-plus-tooltip" } }
+  plus.style.width = 28
+  plus.enabled = cur < GS.MAX
+
+  local bottom = f.add { type = "flow", direction = "horizontal" }
+  bottom.style.top_margin = 8
+  local push = bottom.add { type = "empty-widget" }
+  push.style.horizontally_stretchable = true
+  bottom.add { type = "button", caption = { "production-plus.close" }, tags = { pp = "settings" },
+    tooltip = { "production-plus.settings-close-tooltip" } }
+
+  place_settings(player)
+end
+
+local function set_settings_open(player, st, open)
+  st.settings_open = open or nil
+  if st.gear and st.gear.valid then st.gear.toggled = open end
+  if open then build_settings(player, st) else destroy_settings(player) end
+  set_fit(player, st, open)
+end
+
+local function apply_zoom(player, st)
+  local z = camera_zoom(player, st)
+  for _, g in pairs(st.graphs or {}) do
+    if g.cam and g.cam.valid then g.cam.zoom = z end
+  end
+end
+
+script.on_event(defines.events.on_gui_location_changed, function(e)
+  local el = e.element
+  if el and el.valid and el.name == WINDOW then place_settings(game.get_player(e.player_index)) end
+end)
+
+script.on_event(defines.events.on_player_display_scale_changed or defines.events.on_player_display_resolution_changed, function(e)
+  place_settings(game.get_player(e.player_index))
+end)
+
 script.on_event(defines.events.on_player_created, function(e)
   update_anchor(game.get_player(e.player_index))
 end)
 
 script.on_event(defines.events.on_runtime_mod_setting_changed, function(e)
-  if e.setting ~= "pp-window-mode" or not e.player_index then return end
+  if not e.player_index then return end
   local player = game.get_player(e.player_index)
   if not player then return end
-  update_anchor(player)
-  if player.gui.screen[WINDOW] then build_window(player) end
+  if e.setting == "pp-window-mode" then
+    update_anchor(player)
+  elseif e.setting == "pp-graph-scale" then
+    apply_zoom(player, get_state(e.player_index))
+  end
 end)
 
 ---------------------------------------------------------------------------
@@ -2793,6 +3272,9 @@ script.on_event(defines.events.on_gui_closed, function(e)
   local st = get_state(e.player_index)
   st.closed_tick = game.tick
   el.destroy()
+  local sw = game.get_player(e.player_index).gui.screen.pp_settings
+  if sw and sw.valid then sw.destroy() end
+  st.settings_open = nil
   clear_graphs(st)
   st.views = {}
   st.power_view = nil
@@ -2832,8 +3314,19 @@ script.on_event(defines.events.on_gui_click, function(e)
   elseif action == "to_plus" then
     player.opened = nil
     build_window(player)
+  elseif action == "settings" then
+    set_settings_open(player, st, not st.settings_open)
+  elseif action == "gscale_step" then
+    local n = graph_scale(player, st) + tags.dir * GS.STEP
+    set_graph_scale(player, st, math.max(GS.MIN, math.min(GS.MAX, n)))
+    apply_zoom(player, st)
+    build_settings(player, st)
   elseif action == "view" then
     st.view = tags.view
+    if not KIND.in_view(st.view, st.kind) then
+      st.kind = "items"
+      for _, k in ipairs(PANELS) do st.panels[k].picks = nil end
+    end
     build_window(player)
   elseif action == "mode" then
     st.mode = tags.mode
@@ -2927,7 +3420,7 @@ script.on_event(defines.events.on_gui_selected_tab_changed, function(e)
   if not (el and el.valid and el.name == "pp_tabs") then return end
   local player = game.get_player(e.player_index)
   local st = get_state(e.player_index)
-  local kind = ({ "items", "fluids", "power" })[el.selected_tab_index] or "items"
+  local kind = (TABS[st.view] or TABS.columns)[el.selected_tab_index] or "items"
   if kind ~= st.kind then
     st.kind = kind
     for _, k in ipairs(PANELS) do
@@ -2944,6 +3437,15 @@ script.on_event(defines.events.on_gui_selection_state_changed, function(e)
   if not (el and el.valid and el.tags) then return end
   local player = game.get_player(e.player_index)
   local st = get_state(e.player_index)
+  if el.tags.pp == "wmode" then
+    local m = WINDOW_MODES[el.selected_index]
+    if m and m ~= window_mode(player) then
+      set_window_mode(player, st, m)
+      update_anchor(player)
+      if player.gui.screen[WINDOW] then build_window(player) end
+    end
+    return
+  end
   if el.tags.pp == "surface" then
     local name = st.surface_names and st.surface_names[el.selected_index]
     if name == UNIVERSE then
@@ -3032,6 +3534,7 @@ script.on_event(defines.events.on_tick, function(e)
     update_all_anchors()
   end
   translation_step()
+  if e.tick % EV.EVERY == 0 then EV.record(e.tick) end
   local open = storage.open
   if not (open and next(open)) then return end
   for index in pairs(open) do
@@ -3049,7 +3552,9 @@ script.on_event(defines.events.on_tick, function(e)
       -- stagger players so they don't all refresh on the same tick
       local t = e.tick + index
       if perf then perf.list.restart() end
-      if st.kind == "power" then
+      if st.kind == "evolution" then
+        if t % FULL_INTERVAL == 0 then EV.refresh(player, st) end
+      elseif st.kind == "power" then
         local ps = power_state(st)
         if ps.scan then
           power_scan_step(st)

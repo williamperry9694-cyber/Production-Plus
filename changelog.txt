@@ -1,0 +1,24 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.2.1
+Date: 2026-11-20
+  Features:
+    - Pollution tab (Columns view): Emitted, Absorbed and Net panels from the game's pollution statistics, with a summary of totals and the pollution currently on the surface. Spores on Gleba are shown the same way.
+    - Evolution tab (Table view): enemy evolution over time for the selected surface, and how much of it comes from time, pollution and spawner kills. The mod records the history itself, starting from when this version is installed.
+    - Power is now only in Columns view, since its Table view was identical.
+    - Settings button (gear) at the end of the control row. Opens a settings strip under it without changing the window size.
+    - Graph scale setting: starts at 100%, adjustable from 50% to 300% in 5% steps, remembered across saves. While settings are open, every graph shows a yellow frame so you can see when it fits its box.
+    - Window mode moved from the mod settings menu into the settings strip. Your previous choice carries over and is remembered across saves.
+  Bugfixes:
+    - Graphs did not scale with the UI scale on most screens (they used a fixed zoom measured on one 4K setup). Use Graph scale to fit them to your screen.
+---------------------------------------------------------------------------------------------------
+Version: 0.2.0
+Date: 2026-11-19
+  Features:
+    - Table view, search, CSV export, Power tab, click-to-graph, shift-click pinning, lock and flip, sortable headers.
+  Changes:
+    - Large performance pass and save-safety checks.
+---------------------------------------------------------------------------------------------------
+Version: 0.1.0
+Date: 2026-11-18
+  Features:
+    - Initial release.

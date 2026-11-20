@@ -15,6 +15,7 @@ data:extend({
   sprite("pp-white", "white.png", 8),
   sprite("pp-sort-asc", "sort-asc.png", 32),
   sprite("pp-sort-desc", "sort-desc.png", 32),
+  sprite("pp-gear", "gear.png", 32),
 })
 
 local styles = data.raw["gui-style"].default

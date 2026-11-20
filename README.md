@@ -71,8 +71,21 @@ Exports the current view to `script-output/production-plus/` for spreadsheets.
 
 ![CSV](media/11-csv.gif)
 
+### Pollution tab
+**Emitted**, **Absorbed** and **Net** panels show which buildings put out pollution and what soaks it up: ground, trees and spawners. The Net panel adds a summary with the totals and the amount currently on the surface. Spores on Gleba are shown the same way. Search, pins, click-to-graph, lock and flip all work here too.
+
+### Evolution tab (Table view)
+Enemy evolution over time for the selected planet, plus how much of it comes from **time**, **pollution** and **spawner kills**. The game keeps no evolution history, so the mod records it, starting from when you install it.
+
+### Settings
+The gear button at the end of the control row opens the settings:
+- **Window mode:** Production Plus by default, Vanilla by default, or Production Plus only.
+- **Graph scale:** fits the graphs to your screen, from 50% to 300% in 5% steps. While settings are open, each graph shows a yellow frame, so you can see when it just touches the edges of its box.
+
+Both are saved per player and follow you across saves.
+
 ### Vanilla is one click away
-The **Vanilla view** button opens the original window, which has its own button to come straight back. A per-player setting lets you choose:
+The **Vanilla view** button opens the original window, which has its own button to come straight back. Window mode in the settings lets you choose:
 - Production Plus by default
 - Vanilla by default, with Production Plus one click away
 - Production Plus only
